@@ -15,17 +15,24 @@ from yolov5.models.yolo import Model
 from yolov5.utils.loss import ComputeLoss
 from tqdm import tqdm
 from yolov5.utils.metrics import box_iou
-from yolov5.utils.general import non_max_suppression
 
 # View results
 from yolov5.utils.general import non_max_suppression
 
 class Args:
-    gen_data = False
+    gen_data = True
     load = False
     train = True
+    run_local = True
     mode = "train"
     model = "ultralytics/yolov5"
+    if run_local:
+        root_dir = "../"
+    else:
+        root_dir = "/content/drive/MyDrive/colab_notebooks/Assignment-4"
+    local_root_dir = "../"
+    save_dir = "src/ckpt"
+    data_dir = "yolov5/data"
 
     # Training parameters
     batch_size = 16
@@ -98,12 +105,67 @@ class MNISTDDDataset(Dataset):
         height = (bboxes[:, 3] - bboxes[:, 1]) / 64
         return torch.stack([x_center, y_center, width, height], dim=1)
 
+def save_images(images, output_dir):
+    print("Saving images at", output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    for i, img_vector in enumerate(tqdm(images, desc="Saving images", unit="image")):
+        img = img_vector.reshape((64, 64, 3))  # Reshape to original 64x64x3
+        img = (img * 255).astype(np.uint8)  # Scale if necessary to 0-255
+        cv2.imwrite(os.path.join(output_dir, f"{i}.jpg"), img)
+    print("Done saving images")
+
+def save_labels(bboxes, labels, output_dir, img_dim=64):
+    print("Saving labels at", output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    for i in tqdm(range(bboxes.shape[0]), desc="Saving labels", unit="label"):
+        label_path = os.path.join(output_dir, f"{i}.txt")
+        with open(label_path, "w") as f:
+            for j in range(2):  # Two bounding boxes per image
+                x_min, y_min, x_max, y_max = bboxes[i, j]
+                class_id = labels[i, j]  # YOLO class is the digit
+                x_center = (x_min + x_max) / 2 / img_dim
+                y_center = (y_min + y_max) / 2 / img_dim
+                width = (x_max - x_min) / img_dim
+                height = (y_max - y_min) / img_dim
+                f.write(f"{class_id} {x_center} {y_center} {width} {height}\n")
+    print("Done saving labels")
+
+def create_dataset(args, mode):
+    assert (mode == "train" or mode == "valid")
+    mnistdd_data = np.load(f"{mode}.npz")
+    images = mnistdd_data['images']
+    labels = mnistdd_data['labels']
+    bboxes = mnistdd_data['bboxes']
+
+    root_dir = args.root_dir
+    images_dir = os.path.join(root_dir, args.data_dir, "images", mode)
+    labels_dir = os.path.join(root_dir, args.data_dir, "labels", mode)
+    save_images(images, images_dir)
+    save_labels(bboxes, labels, labels_dir)
+
+
+def dataset_exists(args, mode):
+    """
+    Check if the dataset (images and labels) already exists for a given mode.
+    :param args: Args object containing directory information
+    :param mode: 'train' or 'valid'
+    :return: True if the dataset exists, otherwise False
+    """
+    root_dir = args.root_dir
+    images_dir = os.path.join(root_dir, args.data_dir, "images", mode)
+    labels_dir = os.path.join(root_dir, args.data_dir, "labels", mode)
+
+    # Check if both directories exist and are not empty
+    return os.path.exists(images_dir) and os.listdir(images_dir) and \
+        os.path.exists(labels_dir) and os.listdir(labels_dir)
+
 # Load and modify YOLOv5 configuration
 def load_custom_yolo_model():
     model_config = "yolov5s.yaml"
     with open(model_config) as f:
         cfg = yaml.safe_load(f)
     cfg['nc'] = 10  # Set number of classes to 10 for MNISTDD
+    cfg['img_size'] = [64, 64]  # Set image size for the model
     model = Model(cfg)
     return model
 
@@ -129,7 +191,7 @@ def collate_fn(batch):
         target[:, 0] = i  # Set batch index
     return torch.stack(images), torch.cat(targets, dim=0)
 
-def train_mnistdd(hyp, train_loader, val_loader, model, device, epochs=1, save_dir='./ckpt'):
+def train_mnistdd(args, hyp, train_loader, val_loader, model, device, epochs=1, save_dir='ckpt'):
     """
     Train YOLOv5 model on MNISTDD dataset.
     :param hyp: Hyperparameter dictionary
@@ -140,6 +202,9 @@ def train_mnistdd(hyp, train_loader, val_loader, model, device, epochs=1, save_d
     :param epochs: Number of training epochs
     :param save_dir: Directory for saving checkpoints
     """
+    # Set file directories
+    save_dir = os.path.join(args.root_dir, args.save_dir)
+
     # Attach hyperparameters to the model
     model.hyp = hyp
 
@@ -201,7 +266,7 @@ def validate(val_loader, model, device, iou_threshold=0.5, conf_threshold=0.25):
             preds = model(images)  # Get predictions
 
             # Apply NMS to filter predictions
-            preds = non_max_suppression(preds, conf_thres=conf_threshold, iou_thres=iou_threshold)
+            preds = non_max_suppression(preds, conf_thres=conf_threshold, iou_thres=iou_threshold, max_det=2)  # Limit to 2 detections
 
             # Convert predictions and targets to standard formats
             for pred, target in zip(preds, targets):
@@ -212,6 +277,10 @@ def validate(val_loader, model, device, iou_threshold=0.5, conf_threshold=0.25):
                     all_pred_boxes.append((pred_boxes, pred_scores, pred_labels))
                 else:
                     all_pred_boxes.append((np.array([]), np.array([]), np.array([])))
+
+                # Ensure target is 2D and extract ground truth
+                if target.dim() == 1:
+                    target = target.unsqueeze(0)
 
                 # Convert targets to the format (x1, y1, x2, y2, class)
                 target_boxes = target[:, 2:].cpu().numpy()  # Ground truth boxes
@@ -289,63 +358,6 @@ def calculate_map(pred_boxes, true_boxes, iou_threshold=0.5, num_classes=10):
 
     return np.mean(average_precisions)
 
-def detect_and_segment(images):
-    """
-    :param images: Flattened images of shape (N, 12288)
-    :return: Predicted classes, bounding boxes, and segmentation masks
-    """
-    args = Args()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = None
-
-    if args.load:
-      # Load pretrained model
-      model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=False, classes=10).to(device)
-      model.load_state_dict(torch.load('./ckpt/best.pt'))
-    else:
-      # Load default YOLOv5 model
-      model = torch.hub.load('ultralytics/yolov5', 'yolov5s', autoshape=False, classes=10)
-
-    if args.train:
-      # Train model before evaluating
-      train_dataset = load_dataset("train")
-      valid_dataset = load_dataset("valid")
-      train_loader = DataLoader(train_dataset, args.batch_size, shuffle=True, collate_fn=collate_fn)
-      val_loader = DataLoader(valid_dataset, args.batch_size, shuffle=False, collate_fn=collate_fn)
-      train_mnistdd(args.hyp, train_loader, val_loader, model, device)
-
-    model.eval()
-
-    N = images.shape[0]
-    reshaped_images = images.reshape(N, 3, 64, 64).astype('float32') / 255.0
-    tensor_images = torch.tensor(reshaped_images).to(device)
-
-    pred_class = np.zeros((N, 2), dtype=np.int32)
-    pred_bboxes = np.zeros((N, 2, 4), dtype=np.float64)
-    pred_seg = np.zeros((N, 4096), dtype=np.int32)  # Placeholder for segmentation
-
-    with torch.no_grad():
-        preds = model(tensor_images)  # YOLOv5 prediction
-        detections = non_max_suppression(preds, conf_thres=0.25, iou_thres=0.45)
-
-        for i, det in enumerate(detections):
-            if det is not None:
-                det = det.cpu().numpy()
-                boxes = det[:2, :4]  # Get top 2 bounding boxes
-                classes = det[:2, 5].astype(int)  # Get top 2 class labels
-
-                pred_bboxes[i] = boxes
-                pred_class[i] = sorted(classes)  # Sort class labels as required
-
-                # Optional: Generate a basic segmentation mask from predicted bounding boxes
-                pred_seg[i] = generate_segmentation_mask(reshaped_images[i], boxes)
-            else:
-                print("Model made no detections")
-                pred_bboxes[i] = np.zeros((2, 4))
-                pred_class[i] = [0, 1]  # Dummy values for empty predictions
-
-    return pred_class, pred_bboxes, pred_seg
-
 def generate_segmentation_mask(image, boxes):
     """
     Generate a segmentation mask based on predicted bounding boxes.
@@ -357,3 +369,89 @@ def generate_segmentation_mask(image, boxes):
     for idx, (xmin, ymin, xmax, ymax) in enumerate(boxes.astype(int)):
         mask[ymin:ymax, xmin:xmax] = idx + 1  # Assign labels 1 and 2 for digits
     return mask.flatten()
+
+def detect_and_segment(images):
+    """
+    :param images: Flattened images of shape (N, 12288)
+    :return: Predicted classes, bounding boxes, and segmentation masks
+    """
+    args = Args()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = None
+
+    if args.gen_data:
+        if args.gen_data:
+            if not dataset_exists(args, "train"):
+                create_dataset(args, "train")
+            else:
+                print("Training dataset already exists, skipping creation.")
+
+            if not dataset_exists(args, "valid"):
+                create_dataset(args, "valid")
+            else:
+                print("Validation dataset already exists, skipping creation.")
+
+    if args.load:
+      # Load pretrained model
+      print("Loading pretrained model")
+      model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=False, classes=10).to(device)
+      path = os.path.join(args.root_dir, args.save_dir)
+      model.load_state_dict(torch.load(path))
+    else:
+      # Load default YOLOv5 model
+      print("Loading default model")
+      model = torch.hub.load('ultralytics/yolov5', 'yolov5s', autoshape=False, classes=10).to(device)
+
+    '''
+    if args.train:
+      # Train model before evaluating
+      train_dataset = load_dataset("train")
+      valid_dataset = load_dataset("valid")
+      train_loader = DataLoader(train_dataset, args.batch_size, shuffle=True, collate_fn=collate_fn)
+      val_loader = DataLoader(valid_dataset, args.batch_size, shuffle=False, collate_fn=collate_fn)
+      train_mnistdd(args, args.hyp, train_loader, val_loader, model, device, epochs=50)
+    '''
+
+    model.eval()
+
+    N = images.shape[0]
+    pred_class = np.zeros((N, 2), dtype=np.int32)
+    pred_bboxes = np.zeros((N, 2, 4), dtype=np.float64)
+    pred_seg = np.zeros((N, 4096), dtype=np.int32)  # Placeholder for segmentation
+
+    reshaped_images = images.reshape(N, 3, 64, 64).astype('float32') / 255.0
+    tensor_images = torch.tensor(reshaped_images).to(device)
+
+    pred_class = np.zeros((N, 2), dtype=np.int32)
+    pred_bboxes = np.zeros((N, 2, 4), dtype=np.float64)
+    pred_seg = np.zeros((N, 4096), dtype=np.int32)  # Placeholder for segmentation
+
+    with torch.no_grad():
+        preds = model(tensor_images)  # YOLOv5 prediction
+
+        # Apply Non-Max Suppression (NMS)
+        detections = non_max_suppression(preds, conf_thres=0.25, iou_thres=0.45)
+
+        for i, det in enumerate(detections):
+            if det is not None and len(det) > 0:
+                det = det.cpu().numpy()
+                boxes = det[:2, :4]  # Get top 2 bounding boxes
+                classes = det[:2, 5].astype(int)  # Get top 2 class labels
+
+                # Ensure we have exactly 2 bounding boxes
+                if len(boxes) < 2:
+                    boxes = np.vstack([boxes, np.zeros((2 - len(boxes), 4))])
+                    classes = np.hstack([classes, np.zeros(2 - len(classes), dtype=int)])
+
+                pred_bboxes[i] = boxes
+                pred_class[i] = sorted(classes)  # Sort class labels as required
+
+                # TODO: Generate a segmentation mask from predicted bounding boxes
+                pred_seg[i] = generate_segmentation_mask(reshaped_images[i], boxes)
+            else:
+                # No detections; assign default values
+                pred_bboxes[i] = np.zeros((2, 4))  # Dummy bounding boxes
+                pred_class[i] = [0, 1]  # Dummy class labels
+                pred_seg[i] = np.zeros(4096)  # Dummy segmentation mask
+
+    return pred_class, pred_bboxes, pred_seg
