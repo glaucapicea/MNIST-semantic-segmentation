@@ -128,7 +128,7 @@ def collate_fn(batch):
         target[:, 0] = i  # Set batch index
     return torch.stack(images), torch.cat(targets, dim=0)
 
-def train_mnistdd(hyp, train_loader, val_loader, model, device, epochs=3, save_dir='./ckpt'):
+def train_mnistdd(hyp, train_loader, val_loader, model, device, epochs=1, save_dir='./ckpt'):
     """
     Train YOLOv5 model on MNISTDD dataset.
     :param hyp: Hyperparameter dictionary
