@@ -22,6 +22,7 @@ from yolov5.utils.general import non_max_suppression
 
 class Args:
     gen_data = False
+    load = False
     train = True
     mode = "train"
     model = "ultralytics/yolov5"
@@ -297,17 +298,21 @@ def detect_and_segment(images):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = None
 
-    if args.train:
-        model = torch.hub.load('ultralytics/yolov5', 'yolov5s', autoshape=False, classes=10)
-        train_dataset = load_dataset("train")
-        valid_dataset = load_dataset("valid")
-        train_loader = DataLoader(train_dataset, args.batch_size, shuffle=True, collate_fn=collate_fn)
-        val_loader = DataLoader(valid_dataset, args.batch_size, shuffle=False, collate_fn=collate_fn)
-        train_mnistdd(args.hyp, train_loader, val_loader, model, device)
+    if args.load:
+      # Load pretrained model
+      model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=False, classes=10).to(device)
+      model.load_state_dict(torch.load('./ckpt/best.pt'))
     else:
-        # Load trained YOLOv5 model
-        model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=False, classes=10).to(device)
-        model.load_state_dict(torch.load('./ckpt/best.pt'))
+      # Load default YOLOv5 model
+      model = torch.hub.load('ultralytics/yolov5', 'yolov5s', autoshape=False, classes=10)
+
+    if args.train:
+      # Train model before evaluating
+      train_dataset = load_dataset("train")
+      valid_dataset = load_dataset("valid")
+      train_loader = DataLoader(train_dataset, args.batch_size, shuffle=True, collate_fn=collate_fn)
+      val_loader = DataLoader(valid_dataset, args.batch_size, shuffle=False, collate_fn=collate_fn)
+      train_mnistdd(args.hyp, train_loader, val_loader, model, device)
 
     model.eval()
 
