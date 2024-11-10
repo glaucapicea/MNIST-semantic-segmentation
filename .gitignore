@@ -6,8 +6,8 @@
 # Datasource local storage ignored files
 /dataSources/
 /dataSources.local.xml
-/train.npz
-/valid.npz
+/src/train.npz
+/src/valid.npz
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -28,3 +28,4 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+yolov5/

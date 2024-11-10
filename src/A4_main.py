@@ -10,10 +10,10 @@ class Params:
     def __init__(self):
         # self.prefix = "test"
         self.prefix = "valid"
-        self.load = 1
-        self.save = 1
-        self.eval = 1
-        self.n_samples = 0
+        self.load = 0               # NOTE: Set this to 0 when running an existing model
+        self.save = 0
+        self.eval = 0
+        self.n_samples = 0          # Runs the model on n_samples images instead of the entire set. Try 100
         self.load_path = 'saved_preds.npz'
         self.vis = Params.Visualization()
 
@@ -23,6 +23,7 @@ class Params:
         :ivar pred: show predicted bboxes and masks
         :ivar frg: show foreground segmentation mask used to compute segmentation accuracy along with a mask
          showing the foreground pixels where the predicted mask is incorrect
+         NOTE: Visualization will not run on colab, need to run on home PC
         """
 
         def __init__(self):
@@ -216,6 +217,7 @@ def main():
 
     mnistdd_data = np.load(f"{prefix}.npz")
 
+    # NOTE: How to access the data and it's different parts
     images = mnistdd_data['images']
     gt_classes = mnistdd_data['labels']
     gt_bboxes = mnistdd_data['bboxes']
