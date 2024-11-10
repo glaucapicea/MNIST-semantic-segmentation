@@ -20,17 +20,16 @@ from yolov5.utils.metrics import box_iou
 from yolov5.utils.general import non_max_suppression
 
 class Args:
-    gen_data = True
     load = False
-    train = True
-    run_local = True
     mode = "train"
     model = "ultralytics/yolov5"
-    if run_local:
-        root_dir = "../"
-    else:
-        root_dir = "/content/drive/MyDrive/colab_notebooks/Assignment-4"
-    local_root_dir = "../"
+    environment = "kaggle"
+    directories = {
+        "kaggle": "/kaggle/working",
+        "colab": "/content/drive/MyDrive/colab_notebooks/Assignment-4",
+        "local": "../"
+    }
+    root_dir = directories[environment]
     save_dir = "src/ckpt"
     data_dir = "yolov5/data"
 
@@ -365,10 +364,12 @@ def generate_segmentation_mask(image, boxes):
     :param boxes: Predicted bounding boxes
     :return: Flattened segmentation mask
     """
-    mask = np.zeros((64, 64), dtype=np.int32)
+    # TODO: Complete segmentation mask
+    mask = np.full((64, 64), 10, dtype=np.int32)  # Background as 10
     for idx, (xmin, ymin, xmax, ymax) in enumerate(boxes.astype(int)):
-        mask[ymin:ymax, xmin:xmax] = idx + 1  # Assign labels 1 and 2 for digits
+        mask[ymin:ymax, xmin:xmax] = idx  # Digit ID: 0-9
     return mask.flatten()
+
 
 def detect_and_segment(images):
     """
@@ -379,28 +380,27 @@ def detect_and_segment(images):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = None
 
-    if args.gen_data:
-        if args.gen_data:
-            if not dataset_exists(args, "train"):
-                create_dataset(args, "train")
-            else:
-                print("Training dataset already exists, skipping creation.")
+    # Generate datasets
+    if not dataset_exists(args, "train"):
+        create_dataset(args, "train")
+    else:
+        print("Training dataset already exists, skipping creation.")
 
-            if not dataset_exists(args, "valid"):
-                create_dataset(args, "valid")
-            else:
-                print("Validation dataset already exists, skipping creation.")
+    if not dataset_exists(args, "valid"):
+        create_dataset(args, "valid")
+    else:
+        print("Validation dataset already exists, skipping creation.")
 
+    # Load correct model
     if args.load:
-      # Load pretrained model
-      print("Loading pretrained model")
+      print("Loading saved model")
       model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=False, classes=10).to(device)
       path = os.path.join(args.root_dir, args.save_dir)
       model.load_state_dict(torch.load(path))
     else:
-      # Load default YOLOv5 model
-      print("Loading default model")
+      print("Loading default YOLOv5 model")
       model = torch.hub.load('ultralytics/yolov5', 'yolov5s', autoshape=False, classes=10).to(device)
+    model.eval()
 
     '''
     if args.train:
@@ -412,8 +412,7 @@ def detect_and_segment(images):
       train_mnistdd(args, args.hyp, train_loader, val_loader, model, device, epochs=50)
     '''
 
-    model.eval()
-
+    # Set up return values
     N = images.shape[0]
     pred_class = np.zeros((N, 2), dtype=np.int32)
     pred_bboxes = np.zeros((N, 2, 4), dtype=np.float64)
@@ -422,36 +421,52 @@ def detect_and_segment(images):
     reshaped_images = images.reshape(N, 3, 64, 64).astype('float32') / 255.0
     tensor_images = torch.tensor(reshaped_images).to(device)
 
-    pred_class = np.zeros((N, 2), dtype=np.int32)
-    pred_bboxes = np.zeros((N, 2, 4), dtype=np.float64)
-    pred_seg = np.zeros((N, 4096), dtype=np.int32)  # Placeholder for segmentation
-
     with torch.no_grad():
-        preds = model(tensor_images)  # YOLOv5 prediction
+        # Run model on inputs
+        preds = model(tensor_images)                                                # YOLOv5 prediction
+        detections = non_max_suppression(preds, conf_thres=0.25, iou_thres=0.45)    # Apply Non-Max Suppression (NMS)
 
-        # Apply Non-Max Suppression (NMS)
-        detections = non_max_suppression(preds, conf_thres=0.25, iou_thres=0.45)
-
+        # Read model detections
         for i, det in enumerate(detections):
             if det is not None and len(det) > 0:
+                # Valid detections detected in format: [x1, y1, x2, y2, confidence, class_id]
                 det = det.cpu().numpy()
-                boxes = det[:2, :4]  # Get top 2 bounding boxes
-                classes = det[:2, 5].astype(int)  # Get top 2 class labels
+                boxes = det[:2, :4]                 # Get top 2 bounding boxes
+                classes = det[:2, 5].astype(int)    # Get top 2 class labels
 
                 # Ensure we have exactly 2 bounding boxes
                 if len(boxes) < 2:
                     boxes = np.vstack([boxes, np.zeros((2 - len(boxes), 4))])
                     classes = np.hstack([classes, np.zeros(2 - len(classes), dtype=int)])
 
-                pred_bboxes[i] = boxes
-                pred_class[i] = sorted(classes)  # Sort class labels as required
+                # Sort classes and match boxes
+                sorted_indices = np.argsort(classes)
+                pred_class[i] = classes[sorted_indices]
+                pred_bboxes[i] = boxes[sorted_indices]
 
                 # TODO: Generate a segmentation mask from predicted bounding boxes
                 pred_seg[i] = generate_segmentation_mask(reshaped_images[i], boxes)
             else:
                 # No detections; assign default values
-                pred_bboxes[i] = np.zeros((2, 4))  # Dummy bounding boxes
                 pred_class[i] = [0, 1]  # Dummy class labels
-                pred_seg[i] = np.zeros(4096)  # Dummy segmentation mask
+                pred_bboxes[i] = np.zeros((2, 4))  # Dummy bounding boxes
+                pred_seg[i] = np.full(4096, 10)  # Dummy segmentation mask
 
     return pred_class, pred_bboxes, pred_seg
+
+def main():
+    args = Args()
+
+    # Generate datasets
+    if not dataset_exists(args, "train"):
+        create_dataset(args, "train")
+    else:
+        print("Training dataset already exists, skipping creation.")
+
+    if not dataset_exists(args, "valid"):
+        create_dataset(args, "valid")
+    else:
+        print("Validation dataset already exists, skipping creation.")
+
+if __name__ == '__main__':
+    main()
