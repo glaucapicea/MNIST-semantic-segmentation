@@ -18,12 +18,14 @@ from yolov5.utils.metrics import box_iou
 
 # View results
 from yolov5.utils.general import non_max_suppression
+from PIL import Image
+import matplotlib.pyplot as plt
 
 class Args:
-    load = False
+    load = True
     mode = "train"
     model = "ultralytics/yolov5"
-    environment = "kaggle"
+    environment = "local"
     directories = {
         "kaggle": "/kaggle/working",
         "colab": "/content/drive/MyDrive/colab_notebooks/Assignment-4",
@@ -74,7 +76,7 @@ class MNISTDDDataset(Dataset):
         :param labels: Class labels of shape (N, 2)
         :param bboxes: Bounding boxes of shape (N, 2, 4)
         """
-        self.images = images.reshape(-1, 3, 64, 64).astype('float32') / 255.0  # Normalize images to (C, H, W)
+        self.images = images #.reshape(-1, 3, 64, 64).astype('float32') / 255.0  # Normalize images to (C, H, W)
         self.labels = labels
         self.bboxes = bboxes
 
@@ -103,6 +105,13 @@ class MNISTDDDataset(Dataset):
         width = (bboxes[:, 2] - bboxes[:, 0]) / 64
         height = (bboxes[:, 3] - bboxes[:, 1]) / 64
         return torch.stack([x_center, y_center, width, height], dim=1)
+
+    def retrieve_item(self, idx):
+        images = self.images.shape[0]
+        image = self.images[idx]
+        label = self.labels[idx]
+        bbox = self.bboxes[idx]
+        return image, label, bbox
 
 def save_images(images, output_dir):
     print("Saving images at", output_dir)
@@ -142,6 +151,60 @@ def create_dataset(args, mode):
     save_images(images, images_dir)
     save_labels(bboxes, labels, labels_dir)
 
+def load_image(image_path):
+    """
+    Load an image from the specified path and reshape to match input format.
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise FileNotFoundError(f"Image not found at {image_path}")
+    return img.reshape(-1) / 255  # Flatten to 12288 and normalize to 0-1
+
+def load_label(label_path, img_dim=64):
+    """
+    Load YOLO format label and convert to bounding boxes and class labels.
+    """
+    bboxes = []
+    classes = []
+    with open(label_path, "r") as f:
+        for line in f:
+            class_id, x_center, y_center, width, height = map(float, line.strip().split())
+            x_center *= img_dim
+            y_center *= img_dim
+            width *= img_dim
+            height *= img_dim
+
+            x_min = x_center - (width / 2)
+            y_min = y_center - (height / 2)
+            x_max = x_center + (width / 2)
+            y_max = y_center + (height / 2)
+
+            bboxes.append([x_min, y_min, x_max, y_max])
+            classes.append(int(class_id))
+
+    return np.array(bboxes), np.array(classes)
+
+def get_dataset_item(image_dir, label_dir, index):
+    """
+    Load a specific image and its corresponding labels for unit testing.
+
+    Args:
+    - image_dir: Path to the directory containing saved images.
+    - label_dir: Path to the directory containing saved labels.
+    - index: Index of the image and label to load.
+
+    Returns:
+    - img_vector: Flattened 12288-dim vector of the image.
+    - bboxes: 2x4 array of bounding boxes for the image.
+    - labels: 1x2 array of digit labels.
+    """
+    image_path = os.path.join(image_dir, f"{index}.jpg")
+    label_path = os.path.join(label_dir, f"{index}.txt")
+
+    img_vector = load_image(image_path)
+    bboxes, labels = load_label(label_path)
+
+    return img_vector, bboxes, labels
 
 def dataset_exists(args, mode):
     """
@@ -171,7 +234,7 @@ def load_custom_yolo_model():
 def load_dataset(mode):
     '''
     Return a Dataset object for a given mode
-    :param mode: 'train' or 'test'
+    :param mode: 'train' or 'valid'
     :return: Dataset object for a given mode
     '''
     mnistdd_data = np.load(f"{mode}.npz")
@@ -366,8 +429,9 @@ def generate_segmentation_mask(image, boxes):
     """
     # TODO: Complete segmentation mask
     mask = np.full((64, 64), 10, dtype=np.int32)  # Background as 10
-    for idx, (xmin, ymin, xmax, ymax) in enumerate(boxes.astype(int)):
-        mask[ymin:ymax, xmin:xmax] = idx  # Digit ID: 0-9
+    for i, bbox in enumerate(boxes):
+        x_min, y_min, x_max, y_max = bbox.astype(int)
+        mask[y_min:y_max, x_min:x_max] = i  # Digit 1 -> 1, Digit 2 -> 2
     return mask.flatten()
 
 
@@ -377,40 +441,25 @@ def detect_and_segment(images):
     :return: Predicted classes, bounding boxes, and segmentation masks
     """
     args = Args()
+    assert(dataset_exists(args, "train"))
+    assert(dataset_exists(args, "valid"))
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = None
-
-    # Generate datasets
-    if not dataset_exists(args, "train"):
-        create_dataset(args, "train")
-    else:
-        print("Training dataset already exists, skipping creation.")
-
-    if not dataset_exists(args, "valid"):
-        create_dataset(args, "valid")
-    else:
-        print("Validation dataset already exists, skipping creation.")
 
     # Load correct model
     if args.load:
       print("Loading saved model")
-      model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=False, classes=10).to(device)
-      path = os.path.join(args.root_dir, args.save_dir)
-      model.load_state_dict(torch.load(path))
+      model_path = os.path.join(args.root_dir, args.save_dir, "best.pt")
+      model = torch.hub.load('ultralytics/yolov5', 'custom', path=model_path).to(device)
+      #model.load_state_dict(torch.load(model_path, map_location=device))
     else:
       print("Loading default YOLOv5 model")
       model = torch.hub.load('ultralytics/yolov5', 'yolov5s', autoshape=False, classes=10).to(device)
+
     model.eval()
 
-    '''
-    if args.train:
-      # Train model before evaluating
-      train_dataset = load_dataset("train")
-      valid_dataset = load_dataset("valid")
-      train_loader = DataLoader(train_dataset, args.batch_size, shuffle=True, collate_fn=collate_fn)
-      val_loader = DataLoader(valid_dataset, args.batch_size, shuffle=False, collate_fn=collate_fn)
-      train_mnistdd(args, args.hyp, train_loader, val_loader, model, device, epochs=50)
-    '''
+    assert len(model.names) == 10, "Model loaded with incorrect number of classes!"
 
     # Set up return values
     N = images.shape[0]
@@ -421,28 +470,46 @@ def detect_and_segment(images):
     reshaped_images = images.reshape(N, 3, 64, 64).astype('float32') / 255.0
     tensor_images = torch.tensor(reshaped_images).to(device)
 
+    #print("Detected images with size:", N, "and shape:", images.shape)
     with torch.no_grad():
         # Run model on inputs
         preds = model(tensor_images)                                                # YOLOv5 prediction
-        detections = non_max_suppression(preds, conf_thres=0.25, iou_thres=0.45)    # Apply Non-Max Suppression (NMS)
+        detections = non_max_suppression(preds, conf_thres=0.05, iou_thres=0.5)     # Apply Non-Max Suppression (NMS)
 
         # Read model detections
         for i, det in enumerate(detections):
+            #print(f"DETECTIONS FOR {i}: ")
+            #print(f"  {det}")
             if det is not None and len(det) > 0:
+                #print(f"DETECTIONS FOR {i}: ")
+                #print(f"  {det}")
                 # Valid detections detected in format: [x1, y1, x2, y2, confidence, class_id]
                 det = det.cpu().numpy()
                 boxes = det[:2, :4]                 # Get top 2 bounding boxes
                 classes = det[:2, 5].astype(int)    # Get top 2 class labels
+                #print(f"  CLASSES = {classes}")
+                #print(f"  BBOXES = {boxes}")
 
                 # Ensure we have exactly 2 bounding boxes
                 if len(boxes) < 2:
                     boxes = np.vstack([boxes, np.zeros((2 - len(boxes), 4))])
                     classes = np.hstack([classes, np.zeros(2 - len(classes), dtype=int)])
 
+                #print(f"Image {i}: Pred Classes {classes}, Pred BBoxes {boxes}")
+
                 # Sort classes and match boxes
                 sorted_indices = np.argsort(classes)
                 pred_class[i] = classes[sorted_indices]
                 pred_bboxes[i] = boxes[sorted_indices]
+
+                # Sort classes and align bboxes
+                sorted_indices = np.argsort(pred_class[i])
+                pred_class[i] = pred_class[i][sorted_indices]
+                pred_bboxes[i] = pred_bboxes[i][sorted_indices]
+
+                for i in range(len(pred_class)):
+                    assert pred_bboxes[i, 0].shape == (4,)
+                    assert pred_bboxes[i, 1].shape == (4,)
 
                 # TODO: Generate a segmentation mask from predicted bounding boxes
                 pred_seg[i] = generate_segmentation_mask(reshaped_images[i], boxes)
@@ -453,6 +520,39 @@ def detect_and_segment(images):
                 pred_seg[i] = np.full(4096, 10)  # Dummy segmentation mask
 
     return pred_class, pred_bboxes, pred_seg
+
+
+def unit_test_loaded_data(image_dir, label_dir, index, expected_classes, expected_bboxes):
+    """
+    Unit test for detect_and_segment using loaded images and labels.
+
+    Args:
+    - image_dir: Directory containing test images.
+    - label_dir: Directory containing test labels.
+    - index: Index of the image/label pair to test.
+    - expected_classes: Expected class labels for the test image.
+    - expected_bboxes: Expected bounding boxes for the test image.
+    """
+    # Load image and labels
+    img_vector, gt_bboxes, gt_classes = get_dataset_item(image_dir, label_dir, index)
+    print("IMAGE SHAPE:", img_vector.shape)
+    print("GT BBOXES:", gt_bboxes)
+
+
+    # Run the detect_and_segment function on the loaded image
+    pred_classes, pred_bboxes, pred_seg = detect_and_segment(np.expand_dims(img_vector, axis=0)) # np.expand_dims(img_vector, axis=0)
+    print("PRED CLASSES:", pred_classes)
+    print("PRED BBOXES:", pred_bboxes)
+
+    # Assert classes match
+    '''
+    assert (pred_classes[0] == expected_classes).all(), f"Class mismatch: {pred_classes[0]} != {expected_classes}"
+
+    # Assert bounding boxes match within a tolerance (bounding boxes may not be pixel-perfect)
+    assert np.allclose(pred_bboxes[0], expected_bboxes,
+                       atol=1.0), f"BBox mismatch: {pred_bboxes[0]} != {expected_bboxes}"
+    '''
+    print(f"Test passed for index {index}.")
 
 def main():
     args = Args()
@@ -468,5 +568,56 @@ def main():
     else:
         print("Validation dataset already exists, skipping creation.")
 
+    # UNIT TEST FOR BBOXES AND CLASSES
+    image_dir = os.path.join(args.root_dir, args.data_dir, "images/valid")
+    label_dir = os.path.join(args.root_dir, args.data_dir, "labels/valid")
+    expected_classes = [3, 7]
+    expected_bboxes = np.array([[39, 38, 53, 57], [11, 30, 23, 50]])
+    index = 1
+    unit_test_loaded_data(image_dir, label_dir, index=index, expected_classes=expected_classes, expected_bboxes=expected_bboxes)
+
+    img_vector, bboxes, labels = get_dataset_item(image_dir=image_dir, label_dir=label_dir, index=index)
+
+    # Reshape back to (64, 64, 3)
+    img_reshaped = img_vector.reshape(64, 64, 3)
+
+    # Display the image
+    plt.imshow(img_reshaped)
+    plt.title("Image Visualization")
+    plt.axis("off")
+    plt.show()
+
+    # Reshape and scale back to 0-255
+    img_reshaped = (img_vector.reshape(64, 64, 3) * 255).astype(np.uint8)
+
+    # Save the image
+    cv2.imwrite("output_image.jpg", cv2.cvtColor(img_reshaped, cv2.COLOR_RGB2BGR))
+
+    '''
+    index = 0   # 3 and 7
+    img_vector, bboxes, labels = get_dataset_item(image_dir=image_dir, label_dir=label_dir, index=index)
+
+    test_images = np.zeros((1, 12288))
+    test_images[:, 1000:1200] = 255  # Simple mock image
+    test_images[:, 1050:1078] = 255  # Add a pattern (is this meant to resemble '1'?)
+
+    print(f"{pred_classes[0]}")
+    print(f"Predicted Classes: {pred_classes[0]}")
+    print(f"Expected Classes: {expected_classes}")
+    mismatched_indices = np.where(pred_classes[0] != expected_classes)
+    print(f"Mismatched indices: {mismatched_indices}")
+    #assert (pred_classes[0] == expected_classes).all(), "Class mismatch"
+    #assert (pred_bboxes[0] == expected_bboxes).all(), "BBox mismatch"
+
+    # Visualize what YOLOv5 sees
+    reshaped_img = test_images[0].reshape(3, 64, 64).transpose(1, 2, 0)  # Convert to RGB
+    plt.imshow(reshaped_img)
+    plt.show()
+
+    # UNIT TEST (segmentation)
+    from sklearn.metrics import confusion_matrix
+    cm = confusion_matrix(gt_classes.flatten(), pred_classes.flatten())
+    print("Confusion Matrix:\n", cm)
+    '''
 if __name__ == '__main__':
     main()

@@ -12,7 +12,7 @@ class Params:
         self.prefix = "valid"
         self.load = 0               # NOTE: Set this to 0 when running an existing model
         self.save = 0
-        self.eval = 0
+        self.eval = 1
         self.n_samples = 0          # Runs the model on n_samples images instead of the entire set. Try 100
         self.load_path = 'saved_preds.npz'
         self.vis = Params.Visualization()
@@ -27,7 +27,7 @@ class Params:
         """
 
         def __init__(self):
-            self.enable = 1
+            self.enable = 0
             self.resize_factor = 5
             self.thickness = 2
 
@@ -251,6 +251,15 @@ def main():
         pred_classes = saved_preds['pred_classes']
         pred_bboxes = saved_preds['pred_bboxes']
         pred_seg = saved_preds['pred_seg']
+        assert pred_classes.shape == gt_classes.shape, "Class shape mismatch"
+        assert pred_bboxes.shape == gt_bboxes.shape, "BBox shape mismatch"
+        assert pred_seg.shape == gt_semantic_masks.shape, "Semantic shape mismatch"
+        for i in range(5):  # First 5 validation images
+            print(f"Image {i}: GT Classes {gt_classes[i]}, Pred Classes {pred_classes[i]}")
+            print(f"Image {i}: GT BBoxes {gt_bboxes[i]}, Pred BBoxes {pred_bboxes[i]}")
+            print(f"Image {i}: Segmentation IOU: {compute_iou(pred_seg[i], gt_semantic_masks[i])}")
+
+
         try:
             test_time = saved_preds['test_time']
             test_speed = saved_preds['test_speed']
@@ -264,6 +273,15 @@ def main():
         test_time = end_t - start_t
         assert test_time > 0, "test_time cannot be 0"
         test_speed = float(n_images) / test_time
+        for i in range(5):  # First 5 validation images
+            print(f"Image {i} classes:")
+            print(f"  GT Classes {gt_classes[i]}")
+            print(f"  Pred Classes {pred_classes[i]}")
+            print(f"Image {i} BBoxes:")
+            print(f"    GT BBoxes {gt_bboxes[i]}")
+            print(f"    Pred BBoxes {pred_bboxes[i]}")
+            #print(f"Image {i}: BBox IOU: {compute_iou(pred_bboxes[i, 0, :], gt_bboxes[i, 0, :])}")
+            print(f"Image {i}: BBox IOU: {compute_iou(pred_bboxes[i, 0, :], gt_bboxes[i, 0, :])}\n")
 
         if params.save:
             np.savez_compressed(
