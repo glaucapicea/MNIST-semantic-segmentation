@@ -117,8 +117,7 @@ def save_images(images, output_dir):
     print("Saving images at", output_dir)
     os.makedirs(output_dir, exist_ok=True)
     for i, img_vector in enumerate(tqdm(images, desc="Saving images", unit="image")):
-        img = img_vector.reshape((64, 64, 3))  # Reshape to original 64x64x3
-        img = (img * 255).astype(np.uint8)  # Scale if necessary to 0-255
+        img = img_vector.reshape((64, 64, 3)).astype(np.uint8)  # Scale if necessary to 0-255
         cv2.imwrite(os.path.join(output_dir, f"{i}.jpg"), img)
     print("Done saving images")
 
@@ -447,17 +446,23 @@ def detect_and_segment(images):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = None
 
+    # Suppress all warnings by setting PYTHONWARNINGS
+    os.environ['PYTHONWARNINGS'] = 'ignore'
+    os.environ['WANDB_MODE'] = 'disable'
+
     # Load correct model
     if args.load:
       print("Loading saved model")
       model_path = os.path.join(args.root_dir, args.save_dir, "best.pt")
-      model = torch.hub.load('ultralytics/yolov5', 'custom', path=model_path).to(device)
+
+      model = torch.hub.load('ultralytics/yolov5', 'custom', path=model_path, _verbose=False).to(device)
       #model.load_state_dict(torch.load(model_path, map_location=device))
     else:
       print("Loading default YOLOv5 model")
       model = torch.hub.load('ultralytics/yolov5', 'yolov5s', autoshape=False, classes=10).to(device)
 
     model.eval()
+
 
     assert len(model.names) == 10, "Model loaded with incorrect number of classes!"
 
@@ -467,57 +472,41 @@ def detect_and_segment(images):
     pred_bboxes = np.zeros((N, 2, 4), dtype=np.float64)
     pred_seg = np.zeros((N, 4096), dtype=np.int32)  # Placeholder for segmentation
 
-    reshaped_images = images.reshape(N, 3, 64, 64).astype('float32') / 255.0
-    tensor_images = torch.tensor(reshaped_images).to(device)
+    # predict
+    images = images.reshape((N, 64, 64, 3)).astype(np.uint8)
+    loader = torch.utils.data.DataLoader(images, batch_size=1, shuffle=False)
+    for i, img in tqdm(enumerate(loader)):
 
-    #print("Detected images with size:", N, "and shape:", images.shape)
-    with torch.no_grad():
-        # Run model on inputs
-        preds = model(tensor_images)                                                # YOLOv5 prediction
-        detections = non_max_suppression(preds, conf_thres=0.05, iou_thres=0.5)     # Apply Non-Max Suppression (NMS)
+        img = img.numpy()[0]
+        pred = model(img, size=64).pred[0].cpu().tolist()
 
-        # Read model detections
-        for i, det in enumerate(detections):
-            #print(f"DETECTIONS FOR {i}: ")
-            #print(f"  {det}")
-            if det is not None and len(det) > 0:
-                #print(f"DETECTIONS FOR {i}: ")
-                #print(f"  {det}")
-                # Valid detections detected in format: [x1, y1, x2, y2, confidence, class_id]
-                det = det.cpu().numpy()
-                boxes = det[:2, :4]                 # Get top 2 bounding boxes
-                classes = det[:2, 5].astype(int)    # Get top 2 class labels
-                #print(f"  CLASSES = {classes}")
-                #print(f"  BBOXES = {boxes}")
+        if len(pred) == 0:
+            num1 = [0] * 6
+        else:
+            num1 = pred[0]
 
-                # Ensure we have exactly 2 bounding boxes
-                if len(boxes) < 2:
-                    boxes = np.vstack([boxes, np.zeros((2 - len(boxes), 4))])
-                    classes = np.hstack([classes, np.zeros(2 - len(classes), dtype=int)])
+        if len(pred) > 1:
+            num2 = pred[1]
+        else:
+            num2 = num1
 
-                #print(f"Image {i}: Pred Classes {classes}, Pred BBoxes {boxes}")
+        if num1[5] > num2[5]:
+            num1, num2 = num2, num1
+        nums = [num1[5], num2[5]]
 
-                # Sort classes and match boxes
-                sorted_indices = np.argsort(classes)
-                pred_class[i] = classes[sorted_indices]
-                pred_bboxes[i] = boxes[sorted_indices]
+        boxes = [num1[:4], num2[:4]]
+        boxes2 = []
 
-                # Sort classes and align bboxes
-                sorted_indices = np.argsort(pred_class[i])
-                pred_class[i] = pred_class[i][sorted_indices]
-                pred_bboxes[i] = pred_bboxes[i][sorted_indices]
+        for box in boxes:
+            x_min = max(0, round(box[0]))
+            y_min = max(0, round(box[1]))
+            x_max = min(63, round(box[2]))  # Clip to 64x64 image boundaries
+            y_max = min(63, round(box[3]))
+            boxes2.append([x_min, y_min, x_max, y_max])  # Match expected format
+            #boxes2.append([min_x, min_y, max_x, max_y])  # No swapping x <-> y here
 
-                for i in range(len(pred_class)):
-                    assert pred_bboxes[i, 0].shape == (4,)
-                    assert pred_bboxes[i, 1].shape == (4,)
-
-                # TODO: Generate a segmentation mask from predicted bounding boxes
-                pred_seg[i] = generate_segmentation_mask(reshaped_images[i], boxes)
-            else:
-                # No detections; assign default values
-                pred_class[i] = [0, 1]  # Dummy class labels
-                pred_bboxes[i] = np.zeros((2, 4))  # Dummy bounding boxes
-                pred_seg[i] = np.full(4096, 10)  # Dummy segmentation mask
+        pred_class[i] = nums
+        pred_bboxes[i] = boxes2
 
     return pred_class, pred_bboxes, pred_seg
 
@@ -568,6 +557,7 @@ def main():
     else:
         print("Validation dataset already exists, skipping creation.")
 
+    '''
     # UNIT TEST FOR BBOXES AND CLASSES
     image_dir = os.path.join(args.root_dir, args.data_dir, "images/valid")
     label_dir = os.path.join(args.root_dir, args.data_dir, "labels/valid")
@@ -593,7 +583,6 @@ def main():
     # Save the image
     cv2.imwrite("output_image.jpg", cv2.cvtColor(img_reshaped, cv2.COLOR_RGB2BGR))
 
-    '''
     index = 0   # 3 and 7
     img_vector, bboxes, labels = get_dataset_item(image_dir=image_dir, label_dir=label_dir, index=index)
 
